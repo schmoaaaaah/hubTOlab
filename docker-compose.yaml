@@ -1,0 +1,25 @@
+services:
+  github-gitlab-sync:
+    build: .
+    image: github-gitlab-sync:latest
+    container_name: github-gitlab-sync
+    # environment:
+    #   # GitLab configuration
+    #   - GITLAB_HOST=gitlab.example.com
+    #   - GITLAB_GROUP=github
+    #   # Sync options
+    #   - INCLUDE_FORKS=false
+    #   - INCLUDE_ARCHIVED=false
+    #   - WORK_DIR=/data/repos
+    #   # Auth tokens (alternatively mount config files)
+    #   - GITHUB_TOKEN=${GITHUB_TOKEN}
+    #   - GITLAB_TOKEN=${GITLAB_TOKEN}
+    env_file:
+      - .env
+    volumes:
+      # Persistent storage for mirrored repos
+      - ./data:/data
+      # SSH keys for git operations
+      - ./.ssh:/home/syncer/.ssh:ro
+    # Override command for actual sync
+    command: ["-w", "/data"]

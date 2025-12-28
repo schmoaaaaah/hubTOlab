@@ -1,0 +1,8 @@
+[tools]
+"aqua:cli/cli" = '2.83.2'
+"asdf:mise-plugins/mise-glab" = '1.80.4'
+jq = '1.8.1'
+
+[tasks.sync]
+description = "Run the GitHub to GitLab syncer"
+run = "./sync.sh"
