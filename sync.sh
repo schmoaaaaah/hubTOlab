@@ -140,10 +140,14 @@ get_github_repos() {
 # Check if GitLab repo exists
 gitlab_repo_exists() {
     local repo_name="$1"
-    local encoded_path
-    encoded_path=$(echo "${GITLAB_GROUP}/${repo_name}" | sed 's/\//%2F/g')
-    
-    glab api "projects/$encoded_path" --hostname "$GITLAB_HOST" &> /dev/null
+    local full_path="${GITLAB_GROUP}/${repo_name}"
+
+    # Use search API since glab doesn't handle URL-encoded paths well
+    local result
+    result=$(glab api "projects?search=${repo_name}&search_namespaces=true" --hostname "$GITLAB_HOST" 2>/dev/null \
+        | jq -r ".[] | select(.path_with_namespace==\"${full_path}\") | .id")
+
+    [[ -n "$result" ]]
 }
 
 # Create GitLab repo
@@ -166,16 +170,33 @@ create_gitlab_repo() {
     
     # Get the group ID first
     local group_id
-    group_id=$(glab api "groups/$GITLAB_GROUP" --hostname "$GITLAB_HOST" | jq -r '.id')
-    
-    glab api projects -X POST \
+    group_id=$(glab api "groups/$GITLAB_GROUP" --hostname "$GITLAB_HOST" 2>/dev/null | jq -r '.id')
+
+    if [[ -z "$group_id" || "$group_id" == "null" ]]; then
+        log_error "Failed to get group ID for '$GITLAB_GROUP'"
+        return 1
+    fi
+
+    if ! glab api projects -X POST \
         --hostname "$GITLAB_HOST" \
         -f "name=$repo_name" \
         -f "path=$repo_name" \
         -f "namespace_id=$group_id" \
         -f "visibility=$visibility" \
         -f "description=$description" \
-        -f "initialize_with_readme=false" &> /dev/null
+        -f "initialize_with_readme=false" &>/dev/null; then
+        log_error "GitLab API call failed for '$repo_name'"
+        return 1
+    fi
+}
+
+# Get GitLab repo SSH URL
+get_gitlab_ssh_url() {
+    local repo_name="$1"
+    local full_path="${GITLAB_GROUP}/${repo_name}"
+
+    glab api "projects?search=${repo_name}&search_namespaces=true" --hostname "$GITLAB_HOST" 2>/dev/null \
+        | jq -r ".[] | select(.path_with_namespace==\"${full_path}\") | .ssh_url_to_repo"
 }
 
 # Mirror a repository
@@ -183,10 +204,19 @@ mirror_repo() {
     local repo_name="$1"
     local github_url="$2"
     local repo_dir="$WORK_DIR/$repo_name.git"
-    local gitlab_url="git@$GITLAB_HOST:$GITLAB_GROUP/$repo_name.git"
-    
+    local gitlab_url
+
+    # Get the actual SSH URL from GitLab (includes correct port)
+    gitlab_url=$(get_gitlab_ssh_url "$repo_name")
+    if [[ -z "$gitlab_url" || "$gitlab_url" == "null" ]]; then
+        log_error "Failed to get GitLab SSH URL for $repo_name"
+        return 1
+    fi
+
     log_info "Mirroring: $repo_name"
-    
+    log_info "  GitHub: $github_url"
+    log_info "  GitLab: $gitlab_url"
+
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY RUN] Would mirror $github_url -> $gitlab_url"
         return 0
@@ -196,23 +226,25 @@ mirror_repo() {
     if [[ -d "$repo_dir" ]]; then
         log_info "Updating existing mirror for $repo_name..."
         cd "$repo_dir"
-        git fetch --all --prune
+        # Only fetch from origin (GitHub), not all remotes
+        git fetch origin --prune
     else
         log_info "Creating new mirror for $repo_name..."
         git clone --mirror "$github_url" "$repo_dir"
         cd "$repo_dir"
     fi
-    
-    # Add or update GitLab remote
+
+    # Add or update GitLab remote (do this before push to ensure correct URL)
     if git remote get-url gitlab &> /dev/null; then
         git remote set-url gitlab "$gitlab_url"
     else
         git remote add gitlab "$gitlab_url"
     fi
     
-    # Push mirror to GitLab
-    log_info "Pushing to GitLab..."
-    if git push --mirror gitlab; then
+    # Push branches and tags to GitLab (not --mirror to avoid pushing GitHub PR refs)
+    log_info "Pushing branches and tags to GitLab..."
+    if git push gitlab 'refs/heads/*:refs/heads/*' --force && \
+       git push gitlab 'refs/tags/*:refs/tags/*' --force; then
         log_success "Successfully mirrored $repo_name"
     else
         log_error "Failed to push $repo_name to GitLab"
